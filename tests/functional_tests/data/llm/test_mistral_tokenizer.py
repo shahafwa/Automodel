@@ -19,23 +19,44 @@ for Mistral model types and that basic tokenization operations work.
 """
 
 import os
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from transformers import TokenizersBackend
+from transformers.tokenization_mistral_common import MistralCommonBackend as TransformersMistralCommonBackend
 
 from nemo_automodel._transformers.auto_tokenizer import NeMoAutoTokenizer
+from nemo_automodel._transformers.tokenization.nemo_auto_tokenizer import NeMoAutoTokenizerWithBosEosEnforced
 from nemo_automodel._transformers.tokenization.tokenization_mistral_common import MistralCommonBackend
+from nemo_automodel.components.datasets.llm import BiEncoderCollator
 
 _TEST_DATA_DIR = os.environ.get("TEST_DATA_DIR", "/home/TestData/automodel")
 _TOKENIZER_BASE = Path(_TEST_DATA_DIR) / "tokenizers"
 MISTRAL_7B_INSTRUCT_PATH = _TOKENIZER_BASE / "Mistral-7B-Instruct-v0.1"
+MINISTRAL3_3B_INSTRUCT_PATH = Path(
+    os.environ.get(
+        "MINISTRAL3_TOKENIZER_PATH",
+        _TOKENIZER_BASE / "Ministral-3-3B-Instruct-2512",
+    )
+)
 
 
 @pytest.fixture
 def mistral_tokenizer_path():
-    assert MISTRAL_7B_INSTRUCT_PATH.exists(), "path not exists"
-    return str(MISTRAL_7B_INSTRUCT_PATH)
+    if MISTRAL_7B_INSTRUCT_PATH.exists():
+        return str(MISTRAL_7B_INSTRUCT_PATH)
+    if MINISTRAL3_3B_INSTRUCT_PATH.exists():
+        return str(MINISTRAL3_3B_INSTRUCT_PATH)
+    pytest.fail("No Mistral tokenizer fixture is available")
+
+
+@pytest.fixture
+def ministral3_tokenizer_path():
+    if not MINISTRAL3_3B_INSTRUCT_PATH.exists():
+        pytest.skip("Ministral-3-3B-Instruct-2512 tokenizer fixture is unavailable")
+    return str(MINISTRAL3_3B_INSTRUCT_PATH)
 
 
 @pytest.fixture
@@ -64,6 +85,27 @@ class TestMistralTokenizerDispatch:
     def test_force_hf_returns_raw_hf_tokenizer(self, mistral_tokenizer_path):
         tokenizer = NeMoAutoTokenizer.from_pretrained(mistral_tokenizer_path, force_hf=True)
         assert not isinstance(tokenizer, MistralCommonBackend)
+
+    def test_force_tokenizers_backend_preserves_source_assets(self, ministral3_tokenizer_path, tmp_path):
+        tokenizer = NeMoAutoTokenizer.from_pretrained(
+            ministral3_tokenizer_path,
+            force_tokenizers_backend=True,
+            add_bos_token=False,
+            add_eos_token=False,
+            padding_side="left",
+        )
+
+        assert isinstance(tokenizer, NeMoAutoTokenizerWithBosEosEnforced)
+        assert isinstance(tokenizer, TokenizersBackend)
+        tokenizer.save_pretrained(tmp_path)
+
+        source = Path(ministral3_tokenizer_path)
+        for filename in ("tokenizer.json", "tokenizer_config.json"):
+            assert (tmp_path / filename).read_bytes() == (source / filename).read_bytes()
+
+        expected = TokenizersBackend.from_pretrained(source, padding_side="left")
+        texts = ["query: example", "literal <s> token"]
+        assert tokenizer(texts, add_special_tokens=False) == expected(texts, add_special_tokens=False)
 
 
 class TestMistralCommonBackendTokenization:
@@ -121,3 +163,125 @@ class TestMistralCommonBackendTokenization:
         assert "input_ids" in result
         assert "attention_mask" in result
         assert len(result["input_ids"]) == 2
+
+    def test_retrieval_ids_match_tokenizer_json_without_special_tokens(self, ministral3_tokenizer_path):
+        native = NeMoAutoTokenizer.from_pretrained(ministral3_tokenizer_path, padding_side="left")
+        reference = TokenizersBackend.from_pretrained(ministral3_tokenizer_path, padding_side="left")
+        texts = [
+            "query: example",
+            "passage: a longer example",
+            "line one\nline two",
+            "café 東京 😀",
+        ]
+
+        for max_length in (2, 4, 8, 16):
+            expected = reference(
+                texts,
+                add_special_tokens=False,
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+                return_token_type_ids=False,
+            )
+            actual = native(
+                texts,
+                add_special_tokens=False,
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+                return_token_type_ids=False,
+            )
+            assert actual["input_ids"] == expected["input_ids"]
+            assert actual["attention_mask"] == expected["attention_mask"]
+
+        # mistral-common intentionally treats literal control-token strings as
+        # ordinary text; tokenizer.json interprets them as control-token IDs.
+        assert native.encode("literal <s> token", add_special_tokens=False) != reference.encode(
+            "literal <s> token", add_special_tokens=False
+        )
+
+    def test_retrieval_collator_without_special_tokens(self, ministral3_tokenizer_path):
+        native = NeMoAutoTokenizer.from_pretrained(ministral3_tokenizer_path, padding_side="left")
+        reference = TokenizersBackend.from_pretrained(ministral3_tokenizer_path, padding_side="left")
+        collator_kwargs = {
+            "q_max_len": 6,
+            "p_max_len": 7,
+            "padding": True,
+            "pad_to_multiple_of": 4,
+            "add_special_tokens": False,
+        }
+        native_collator = BiEncoderCollator(
+            tokenizer=native,
+            **collator_kwargs,
+        )
+        reference_collator = BiEncoderCollator(
+            tokenizer=reference,
+            **collator_kwargs,
+        )
+        batch = [
+            {"question": "short query", "doc_text": ["short document", "a much longer document to truncate"]},
+            {"question": "a longer query to truncate", "doc_text": ["document", "another document"]},
+        ]
+
+        actual = native_collator(batch)
+        expected = reference_collator(batch)
+
+        assert actual.keys() == expected.keys()
+        for key in actual:
+            assert actual[key].equal(expected[key]), key
+
+    def test_save_reload_preserves_token_ids(self, ministral3_tokenizer_path, tmp_path):
+        tokenizer = NeMoAutoTokenizer.from_pretrained(ministral3_tokenizer_path, padding_side="left")
+        tokenizer.save_pretrained(tmp_path)
+        reloaded = MistralCommonBackend.from_pretrained(tmp_path, padding_side="left")
+
+        texts = ["query: example", "passage: a longer example"]
+        for add_special_tokens in (False, True):
+            expected = tokenizer(
+                texts,
+                padding=True,
+                truncation=True,
+                max_length=8,
+                add_special_tokens=add_special_tokens,
+            )
+            actual = reloaded(
+                texts,
+                padding=True,
+                truncation=True,
+                max_length=8,
+                add_special_tokens=add_special_tokens,
+            )
+            assert actual["input_ids"] == expected["input_ids"]
+            assert actual["attention_mask"] == expected["attention_mask"]
+
+        upstream = TransformersMistralCommonBackend.from_pretrained(tmp_path, padding_side="left")
+        expected = tokenizer(texts, add_special_tokens=False)
+        actual = upstream(texts, add_special_tokens=False)
+        assert actual["input_ids"] == expected["input_ids"]
+        assert actual["attention_mask"] == expected["attention_mask"]
+
+    def test_tokenizer_json_only_checkpoint_falls_back(self, ministral3_tokenizer_path, tmp_path):
+        source_dir = tmp_path / "source"
+        save_dir = tmp_path / "saved"
+        source_dir.mkdir()
+        for filename in ("config.json", "tokenizer.json", "tokenizer_config.json"):
+            shutil.copy(Path(ministral3_tokenizer_path) / filename, source_dir / filename)
+
+        tokenizer = NeMoAutoTokenizer.from_pretrained(source_dir, padding_side="left")
+        reference = TokenizersBackend.from_pretrained(source_dir, padding_side="left")
+        texts = ["query: example", "passage: a longer example"]
+
+        expected = reference(texts, add_special_tokens=False, padding=True)
+        actual = tokenizer(texts, add_special_tokens=False, padding=True)
+        assert actual["input_ids"] == expected["input_ids"]
+        assert actual["attention_mask"] == expected["attention_mask"]
+
+        tokenizer.save_pretrained(save_dir)
+        for filename in ("tokenizer.json", "tokenizer_config.json"):
+            assert (save_dir / filename).read_bytes() == (source_dir / filename).read_bytes()
+
+        shutil.copy(source_dir / "config.json", save_dir / "config.json")
+        reloaded = NeMoAutoTokenizer.from_pretrained(save_dir, padding_side="left")
+        actual = reloaded(texts, add_special_tokens=False, padding=True)
+        assert actual["input_ids"] == expected["input_ids"]
+        assert actual["attention_mask"] == expected["attention_mask"]

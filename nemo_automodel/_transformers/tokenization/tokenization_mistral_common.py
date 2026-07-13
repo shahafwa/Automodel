@@ -1753,6 +1753,7 @@ class MistralCommonBackend(PreTrainedTokenizerBase):
         stride: int = 0,
         pad_to_multiple_of: int | None = None,
         padding_side: str | None = None,
+        return_token_type_ids: bool | None = None,
         return_tensors: str | TensorType | None = None,
         return_attention_mask: bool | None = None,
         return_overflowing_tokens: bool = False,
@@ -1775,9 +1776,13 @@ class MistralCommonBackend(PreTrainedTokenizerBase):
                 Not supported by `MistralCommonBackend`. Kept to match the signature of `PreTrainedTokenizerBase.__call__`.
             text_pair_target (`None`, *optional*):
                 Not supported by `MistralCommonBackend`. Kept to match the signature of `PreTrainedTokenizerBase.__call__`.
+            return_token_type_ids (`bool`, *optional*):
+                Must be `False` or `None`; Mistral models do not use token type IDs.
         """
         if kwargs:
             raise ValueError(f"Kwargs {list(kwargs.keys())} are not supported by `MistralCommonBackend.__call__`.")
+        if return_token_type_ids:
+            raise ValueError("`return_token_type_ids=True` is not supported by `MistralCommonBackend`.")
 
         if text_pair or text_target or text_pair_target:
             raise ValueError(

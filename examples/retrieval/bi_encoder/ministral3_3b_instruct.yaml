@@ -48,11 +48,14 @@ model:
   extract_submodel: language_model
 
 tokenizer:
+  # Keep the tokenizer.json backend used by the embedding distillation pipeline.
+  # Remove force_tokenizers_backend to opt in to native mistral-common tokenization.
   _target_: nemo_automodel.NeMoAutoTokenizer.from_pretrained
   pretrained_model_name_or_path: mistralai/Ministral-3-3B-Instruct-2512
-  add_eos_token: false
   padding_side: left
-  force_hf: true
+  force_tokenizers_backend: true
+  add_bos_token: false
+  add_eos_token: false
 
 dataset:
   _target_: nemo_automodel.components.datasets.llm.retrieval_dataset.RetrievalDatasetConfig
@@ -73,6 +76,10 @@ dataloader:
     query_prefix: "query:"
     passage_prefix: "passage:"
     pad_to_multiple_of: 8
+    # The embedding distillation tokenizer adds neither BOS nor EOS.
+    # Keep this explicit so changing tokenizer backends cannot silently alter
+    # embedding inputs.
+    add_special_tokens: false
   shuffle: true
   num_workers: 0
 
@@ -97,6 +104,7 @@ dataloader:
 #     passage_prefix: "passage:"
 #     padding: longest
 #     pad_to_multiple_of: 8
+#     add_special_tokens: false
 #   batch_size: 2
 #   shuffle: false
 #   num_workers: 0

@@ -69,6 +69,7 @@ class BiEncoderCollator:
         passage_prefix: str = "",
         padding: Union[bool, str, PaddingStrategy] = True,
         pad_to_multiple_of: int = None,
+        add_special_tokens: bool = True,
         use_dataset_instruction: bool = False,
     ):
         """
@@ -82,6 +83,8 @@ class BiEncoderCollator:
             passage_prefix: Prefix to add to passages (e.g., "passage: ")
             padding: Padding strategy ("longest", "max_length", or "do_not_pad")
             pad_to_multiple_of: Pad to multiple of this value (e.g., 8 for FP16)
+            add_special_tokens: Whether the tokenizer adds model-specific special
+                tokens to queries and passages.
             use_dataset_instruction: Whether to use instruction from dataset's metadata
         """
         self.tokenizer = tokenizer
@@ -91,6 +94,7 @@ class BiEncoderCollator:
         self.passage_prefix = passage_prefix
         self.padding = padding
         self.pad_to_multiple_of = pad_to_multiple_of
+        self.add_special_tokens = add_special_tokens
         self.use_dataset_instruction = use_dataset_instruction
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
@@ -153,6 +157,7 @@ class BiEncoderCollator:
             padding=PaddingStrategy.DO_NOT_PAD,
             truncation=True,
             return_token_type_ids=False,
+            add_special_tokens=self.add_special_tokens,
         )
 
         # Tokenize documents (no padding yet)
@@ -162,6 +167,7 @@ class BiEncoderCollator:
             padding=PaddingStrategy.DO_NOT_PAD,
             truncation=True,
             return_token_type_ids=False,
+            add_special_tokens=self.add_special_tokens,
         )
 
         # Merge into features format for unpacking

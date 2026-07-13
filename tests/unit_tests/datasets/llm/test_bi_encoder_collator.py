@@ -21,6 +21,9 @@ import nemo_automodel.components.datasets.llm.retrieval_collator as rc
 
 
 class FakeTokenizer:
+    def __init__(self):
+        self.calls = []
+
     def __call__(
         self,
         texts: List[str],
@@ -28,7 +31,9 @@ class FakeTokenizer:
         padding: Any,
         truncation: bool,
         return_token_type_ids: bool,
+        add_special_tokens: bool,
     ) -> Dict[str, List[List[int]]]:
+        self.calls.append({"texts": texts, "add_special_tokens": add_special_tokens})
         # Simple whitespace tokenizer: ids are range(len(tokens))
         input_ids = []
         attention_masks = []
@@ -115,6 +120,22 @@ def test_collator_end_to_end_no_prefix():
     # Ensure attention masks align with input_ids shapes
     assert out["q_input_ids"].shape == out["q_attention_mask"].shape
     assert out["d_input_ids"].shape == out["d_attention_mask"].shape
+
+
+def test_collator_can_disable_special_tokens():
+    tok = FakeTokenizer()
+    collator = rc.BiEncoderCollator(
+        tokenizer=tok,
+        q_max_len=16,
+        p_max_len=16,
+        padding=True,
+        add_special_tokens=False,
+    )
+
+    collator(_make_batch(num_examples=2, docs_per_example=2))
+
+    assert len(tok.calls) == 2
+    assert all(call["add_special_tokens"] is False for call in tok.calls)
 
 
 def test_collator_with_prefix_and_pad_multiple():

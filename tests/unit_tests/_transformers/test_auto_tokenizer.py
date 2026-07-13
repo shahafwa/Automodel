@@ -242,6 +242,72 @@ class TestNeMoAutoTokenizerFromPretrained:
                 NeMoAutoTokenizer.from_pretrained("dummy/model", trust_remote_code=True)
             mock_resolve.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("model_path", "error_message"),
+        [
+            ("local", "No tokenizer file found in directory"),
+            ("org/model", "No valid tokenizer file found in the repo"),
+        ],
+    )
+    def test_mistral_tokenizer_json_only_falls_back_to_preserving_backend(self, tmp_path, model_path, error_message):
+        class MistralCommonBackend:
+            @classmethod
+            def from_pretrained(cls, *args, **kwargs):
+                raise ValueError(f"{error_message}: {args[0]}")
+
+        if model_path == "local":
+            model_path = str(tmp_path)
+            (tmp_path / "tokenizer.json").write_text("{}")
+        fallback = _StubHFTokenizer()
+        target = (
+            "nemo_automodel._transformers.tokenization.nemo_auto_tokenizer."
+            "NeMoAutoTokenizerWithBosEosEnforced.from_pretrained"
+        )
+        with (
+            patch(
+                "transformers.AutoConfig.from_pretrained", return_value=type("Config", (), {"model_type": "mistral3"})()
+            ),
+            patch(
+                "nemo_automodel._transformers.tokenization.registry.TokenizerRegistry.get_custom_tokenizer_cls",
+                return_value=MistralCommonBackend,
+            ),
+            patch(target, return_value=fallback) as load_fallback,
+        ):
+            tokenizer = NeMoAutoTokenizer.from_pretrained(model_path, padding_side="left")
+
+        assert tokenizer is fallback
+        load_fallback.assert_called_once_with(
+            model_path,
+            add_bos_token=False,
+            add_eos_token=False,
+            force_tokenizers_backend=True,
+            trust_remote_code=False,
+            padding_side="left",
+        )
+
+    def test_force_tokenizers_backend_uses_preserving_wrapper(self):
+        stub = _StubHFTokenizer()
+        target = (
+            "nemo_automodel._transformers.tokenization.nemo_auto_tokenizer."
+            "NeMoAutoTokenizerWithBosEosEnforced.from_pretrained"
+        )
+        with patch(target, return_value=stub) as load_backend:
+            tokenizer = NeMoAutoTokenizer.from_pretrained(
+                "dummy/model",
+                force_tokenizers_backend=True,
+                add_bos_token=False,
+                add_eos_token=False,
+            )
+
+        assert tokenizer is stub
+        load_backend.assert_called_once_with(
+            "dummy/model",
+            force_tokenizers_backend=True,
+            trust_remote_code=False,
+            add_bos_token=False,
+            add_eos_token=False,
+        )
+
     def test_force_hf_passthrough(self):
         stub = _StubHFTokenizer()
         with patch("transformers.AutoTokenizer.from_pretrained", return_value=stub):

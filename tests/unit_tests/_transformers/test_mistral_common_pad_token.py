@@ -29,6 +29,8 @@ The fix makes:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from nemo_automodel._transformers.tokenization.tokenization_mistral_common import (
     MistralCommonBackend,
     MistralTokenizerType,
@@ -39,6 +41,7 @@ from nemo_automodel.components.datasets.llm.formatting_utils import _add_pad_tok
 # Helpers: lightweight stub that mimics MistralCommonBackend without needing
 # a real SentencePiece file on disk.
 # ---------------------------------------------------------------------------
+
 
 def _make_stub_tokenizer(pad_id=-1, eos_id=2, bos_id=1, unk_id=0, vocab_size=32000):
     """
@@ -90,6 +93,7 @@ def _make_stub_tokenizer(pad_id=-1, eos_id=2, bos_id=1, unk_id=0, vocab_size=320
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestPadTokenIdProperty:
     """pad_token_id should return None for invalid underlying pad_id."""
@@ -193,3 +197,31 @@ class TestAddPadTokenIntegration:
         assert pad_id == 3
         # pad_token_id should remain unchanged
         assert tok.pad_token_id == 3
+
+
+class TestCallCompatibility:
+    """The retrieval collator's standard tokenizer arguments should be accepted."""
+
+    @pytest.mark.parametrize("return_token_type_ids", [False, None])
+    def test_accepts_disabled_token_type_ids(self, return_token_type_ids):
+        tok = _make_stub_tokenizer()
+        expected = {"input_ids": [[1]], "attention_mask": [[1]]}
+
+        with (
+            patch.object(
+                tok,
+                "_get_padding_truncation_strategies",
+                return_value=(None, None, None, {}),
+            ),
+            patch.object(tok, "_batch_encode_plus", return_value=expected) as batch_encode,
+        ):
+            result = tok(["query: example"], return_token_type_ids=return_token_type_ids)
+
+        assert result == expected
+        batch_encode.assert_called_once()
+
+    def test_rejects_enabled_token_type_ids(self):
+        tok = _make_stub_tokenizer()
+
+        with pytest.raises(ValueError, match="return_token_type_ids=True"):
+            tok(["query: example"], return_token_type_ids=True)

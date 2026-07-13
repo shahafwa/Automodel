@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from pathlib import Path
 from typing import Callable, Optional, Type, Union
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ class NeMoAutoTokenizer:
         *args,
         force_default: bool = False,
         force_hf: bool = False,
+        force_tokenizers_backend: bool = False,
         trust_remote_code: bool = False,
         **kwargs,
     ):
@@ -97,6 +99,7 @@ class NeMoAutoTokenizer:
             pretrained_model_name_or_path: Model identifier or path
             force_default: If True, always use NeMoAutoTokenizerWithBosEosEnforced
             force_hf: If True, return the raw HF AutoTokenizer without any wrapping
+            force_tokenizers_backend: If True, load tokenizer.json through Transformers TokenizersBackend
             trust_remote_code: Whether to trust remote code when loading config
             **kwargs: Additional arguments passed to the tokenizer's from_pretrained
 
@@ -111,6 +114,19 @@ class NeMoAutoTokenizer:
                 pretrained_model_name_or_path, *args, trust_remote_code=trust_remote_code, **kwargs
             )
 
+        if force_tokenizers_backend:
+            from nemo_automodel._transformers.tokenization.nemo_auto_tokenizer import (
+                NeMoAutoTokenizerWithBosEosEnforced,
+            )
+
+            return NeMoAutoTokenizerWithBosEosEnforced.from_pretrained(
+                pretrained_model_name_or_path,
+                *args,
+                force_tokenizers_backend=True,
+                trust_remote_code=trust_remote_code,
+                **kwargs,
+            )
+
         # Try to determine model type from config
         model_type = _get_model_type(pretrained_model_name_or_path, trust_remote_code=trust_remote_code)
 
@@ -120,7 +136,40 @@ class NeMoAutoTokenizer:
             tokenizer_cls = registry.get_custom_tokenizer_cls(model_type)
             if tokenizer_cls is not None:
                 logger.info(f"Using custom tokenizer {tokenizer_cls.__name__} for model type '{model_type}'")
-                tokenizer = tokenizer_cls.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+                try:
+                    tokenizer = tokenizer_cls.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+                except ValueError as error:
+                    error_message = str(error)
+                    tokenizer_path = Path(pretrained_model_name_or_path)
+                    local_tokenizer_json_only = (
+                        tokenizer_path.is_dir()
+                        and (tokenizer_path / "tokenizer.json").is_file()
+                        and "No tokenizer file found in directory" in error_message
+                    )
+                    hub_tokenizer_json_only = "No valid tokenizer file found in the repo" in error_message
+                    can_fall_back_to_tokenizer_json = tokenizer_cls.__name__ == "MistralCommonBackend" and (
+                        local_tokenizer_json_only or hub_tokenizer_json_only
+                    )
+                    if not can_fall_back_to_tokenizer_json:
+                        raise
+
+                    from nemo_automodel._transformers.tokenization.nemo_auto_tokenizer import (
+                        NeMoAutoTokenizerWithBosEosEnforced,
+                    )
+
+                    logger.warning(
+                        "No native Mistral tokenizer artifact found in %s; loading tokenizer.json instead.",
+                        pretrained_model_name_or_path,
+                    )
+                    tokenizer = NeMoAutoTokenizerWithBosEosEnforced.from_pretrained(
+                        pretrained_model_name_or_path,
+                        *args,
+                        add_bos_token=False,
+                        add_eos_token=False,
+                        force_tokenizers_backend=True,
+                        trust_remote_code=trust_remote_code,
+                        **kwargs,
+                    )
                 from nemo_automodel._transformers.tokenization.nemo_auto_tokenizer import _ensure_pad_token_id
 
                 _ensure_pad_token_id(tokenizer, pretrained_model_name_or_path)
