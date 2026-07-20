@@ -49,6 +49,7 @@ from nemo_automodel.components.config._arg_parser import parse_args_and_load_con
 from nemo_automodel.components.datasets.vlm.pp_media import stage_vlm_media_for_pp
 from nemo_automodel.components.distributed.config import DistributedSetup, MegatronFSDPConfig
 from nemo_automodel.components.distributed.cp_utils import make_cp_batch_and_ctx
+from nemo_automodel.components.distributed.cp_vision_shard import reset_cp_vision_group, set_cp_vision_group
 from nemo_automodel.components.distributed.init_utils import initialize_distributed
 from nemo_automodel.components.distributed.magi_attn_utils import MagiState, setup_magi
 from nemo_automodel.components.distributed.pipelining import AutoPipeline
@@ -774,6 +775,31 @@ class FinetuneRecipeForVLM(BaseRecipe):
                     ),
                 )
 
+    def _run_cp_pre_embed(self, model: torch.nn.Module, mm_kwargs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Run the VLM CP pre-embed with the vision tower sharded across the CP group.
+
+        Publishes the CP process group to ``cp_vision_shard`` for the duration of the
+        pre-embed forward, so ``maybe_distribute_visual`` inside the model shards the vision
+        tower across CP ranks (each runs the ViT on a frame slice, then all-gathers the
+        per-frame embeds) instead of the full ViT running redundantly on every CP rank. The
+        published group is CP-only (``spans_only_cp=True``), which is gradient-correct for
+        both frozen and trainable towers. A transparent passthrough when vision sharding is
+        disabled or ``cp_size <= 1``. Only called when the CP submesh has ``size > 1``.
+
+        Args:
+            model: The CP-active VLM model part exposing ``prepare_model_inputs_for_cp``.
+            mm_kwargs: Multimodal batch tensors (``input_ids``, ``pixel_values``, grid_thw,
+                ...) forwarded to the pre-embed call; each keeps its batch device.
+
+        Returns:
+            The pre-embed output mapping (``inputs_embeds`` / ``position_ids``) from the model.
+        """
+        token = set_cp_vision_group(self.device_mesh["cp"].get_group())
+        try:
+            return model(_pre_embed_only=True, **mm_kwargs)
+        finally:
+            reset_cp_vision_group(token)
+
     def _forward_backward_step(
         self,
         idx,
@@ -797,7 +823,7 @@ class FinetuneRecipeForVLM(BaseRecipe):
         if _cp_active and hasattr(_model, "prepare_model_inputs_for_cp"):
             if not self.pp_enabled or getattr(self.pp.info, "has_first_stage", False):
                 mm_kwargs = {k: batch[k] for k in VLM_INPUT_KEYS if batch.get(k) is not None}
-                prepared = _model(_pre_embed_only=True, **mm_kwargs)
+                prepared = self._run_cp_pre_embed(_model, mm_kwargs)
                 for k in VLM_INPUT_KEYS:
                     batch.pop(k, None)
                 batch.update(prepared)
@@ -1124,7 +1150,7 @@ class FinetuneRecipeForVLM(BaseRecipe):
                 if _cp_active and hasattr(_model, "prepare_model_inputs_for_cp"):
                     mm_kwargs = {k: batch[k] for k in VLM_INPUT_KEYS if batch.get(k) is not None}
                     with torch.no_grad():
-                        prepared = _model(_pre_embed_only=True, **mm_kwargs)
+                        prepared = self._run_cp_pre_embed(_model, mm_kwargs)
                     for k in VLM_INPUT_KEYS:
                         batch.pop(k, None)
                     batch.update(prepared)
