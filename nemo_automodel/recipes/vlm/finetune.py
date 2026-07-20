@@ -439,6 +439,7 @@ class FinetuneRecipeForVLM(BaseRecipe):
             self.moe_parallel_config,
             self.activation_checkpointing,
         ) = self._distributed_setup_attributes(self._create_distributed_setup())
+        self.cp_vision_sharding = self.cfg.cp_vision_sharding
 
         if not self._should_setup_training_components():
             return
@@ -794,7 +795,10 @@ class FinetuneRecipeForVLM(BaseRecipe):
         Returns:
             The pre-embed output mapping (``inputs_embeds`` / ``position_ids``) from the model.
         """
-        token = set_cp_vision_group(self.device_mesh["cp"].get_group())
+        token = set_cp_vision_group(
+            self.device_mesh["cp"].get_group(),
+            config=self.cp_vision_sharding,
+        )
         try:
             return model(_pre_embed_only=True, **mm_kwargs)
         finally:
