@@ -38,6 +38,10 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5Model as HFQwen3_5Model,
 )
 
+from nemo_automodel.components.distributed.cp_vision_shard import (
+    cp_vision_sharding_active,
+    maybe_distribute_visual,
+)
 from nemo_automodel.components.models.common import BackendConfig
 from nemo_automodel.components.models.common.hf_checkpointing_mixin import HFCheckpointingMixin
 from nemo_automodel.components.models.common.mtp import MTPConfig, MTPModule, roll_tensor
@@ -969,6 +973,47 @@ class Qwen3_5ForConditionalGeneration(HFCheckpointingMixin, HFQwen3_5ForConditio
 
         return pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw
 
+    def _encode_vision_for_cp(
+        self,
+        pixel_values: torch.Tensor,
+        grid_thw: torch.Tensor,
+        *,
+        is_video: bool,
+    ) -> torch.Tensor:
+        """Encode one modality's patches into flat, entry-ordered visual tokens for CP pre-embed.
+
+        Under context parallelism the vision tower otherwise runs redundantly on the full,
+        un-sharded patch set on every CP rank. When the CP vision-shard group is published
+        (see :func:`~nemo_automodel.components.distributed.cp_vision_shard.set_cp_vision_group`),
+        route the single ``self.model.visual`` call through
+        :func:`~nemo_automodel.components.distributed.cp_vision_shard.maybe_distribute_visual`,
+        which shards the frames across the CP group and all-gathers the per-frame embeds in
+        original entry order. Its ``pooler_output`` is the flat, already-concatenated tensor,
+        identical to ``torch.cat(get_image_features(...).pooler_output, dim=0)`` (HF
+        ``get_image_features`` splits that same flat tensor per entry). When sharding is
+        disabled / inactive this is the exact replicated ``get_image_features`` /
+        ``get_video_features`` path.
+
+        Args:
+            pixel_values: Patch rows of shape ``[total_patch_rows, patch_dim]`` for ALL entries
+                of one modality, frame-contiguous in entry order.
+            grid_thw: ``[num_entries, 3]`` tensor of per-entry ``(t, h, w)`` grid sizes.
+            is_video: Select the video (``True``) vs image (``False``) replicated fallback.
+
+        Returns:
+            ``[total_patch_rows / spatial_merge_size**2, hidden]`` flat merged-token embeddings
+            in original entry order (vision hidden size), on the vision tower's output device.
+        """
+        if cp_vision_sharding_active():
+            return maybe_distribute_visual(
+                self.model.visual, pixel_values.type(self.model.visual.dtype), grid_thw
+            ).pooler_output
+        if is_video:
+            outputs = self.model.get_video_features(pixel_values, grid_thw, return_dict=True)
+        else:
+            outputs = self.model.get_image_features(pixel_values, grid_thw, return_dict=True)
+        return torch.cat(outputs.pooler_output, dim=0)
+
     def prepare_model_inputs_for_cp(
         self,
         input_ids: torch.Tensor,
@@ -1009,8 +1054,8 @@ class Qwen3_5ForConditionalGeneration(HFCheckpointingMixin, HFQwen3_5ForConditio
         if pixel_values is not None:
             if hasattr(self.model.visual, "rotary_pos_emb"):
                 self.model.visual.rotary_pos_emb.to(pixel_values.device)
-            image_outputs = self.model.get_image_features(pixel_values, image_grid_thw, return_dict=True)
-            image_embeds = torch.cat(image_outputs.pooler_output, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            image_embeds = self._encode_vision_for_cp(pixel_values, image_grid_thw, is_video=False)
+            image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
             image_mask, _ = self.model.get_placeholder_mask(
                 input_ids,
                 inputs_embeds=inputs_embeds,
@@ -1021,8 +1066,8 @@ class Qwen3_5ForConditionalGeneration(HFCheckpointingMixin, HFQwen3_5ForConditio
         if pixel_values_videos is not None:
             if hasattr(self.model.visual, "rotary_pos_emb"):
                 self.model.visual.rotary_pos_emb.to(pixel_values_videos.device)
-            video_outputs = self.model.get_video_features(pixel_values_videos, video_grid_thw, return_dict=True)
-            video_embeds = torch.cat(video_outputs.pooler_output, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            video_embeds = self._encode_vision_for_cp(pixel_values_videos, video_grid_thw, is_video=True)
+            video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
             _, video_mask = self.model.get_placeholder_mask(
                 input_ids,
                 inputs_embeds=inputs_embeds,
