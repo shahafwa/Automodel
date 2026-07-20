@@ -776,7 +776,7 @@ class FinetuneRecipeForVLM(BaseRecipe):
                     ),
                 )
 
-    def _run_cp_pre_embed(self, model: torch.nn.Module, mm_kwargs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    def _run_cp_pre_embed(self, model: torch.nn.Module, mm_kwargs: dict[str, torch.Tensor]) -> dict[str, Any]:
         """Run the VLM CP pre-embed with the vision tower sharded across the CP group.
 
         Publishes the CP process group to ``cp_vision_shard`` for the duration of the
@@ -793,7 +793,8 @@ class FinetuneRecipeForVLM(BaseRecipe):
                 ...) forwarded to the pre-embed call; each keeps its batch device.
 
         Returns:
-            The pre-embed output mapping (``inputs_embeds`` / ``position_ids``) from the model.
+            The model-owned pre-embed mapping. It contains ``inputs_embeds`` and
+            may include ``position_ids`` plus private model-owned CP batch fields.
         """
         token = set_cp_vision_group(
             self.device_mesh["cp"].get_group(),
@@ -827,6 +828,9 @@ class FinetuneRecipeForVLM(BaseRecipe):
         if _cp_active and hasattr(_model, "prepare_model_inputs_for_cp"):
             if not self.pp_enabled or getattr(self.pp.info, "has_first_stage", False):
                 mm_kwargs = {k: batch[k] for k in VLM_INPUT_KEYS if batch.get(k) is not None}
+                mm_kwargs.update(
+                    {key: batch[key] for key in ("attention_mask", "position_ids") if batch.get(key) is not None}
+                )
                 prepared = self._run_cp_pre_embed(_model, mm_kwargs)
                 for k in VLM_INPUT_KEYS:
                     batch.pop(k, None)
@@ -1153,6 +1157,9 @@ class FinetuneRecipeForVLM(BaseRecipe):
                 )
                 if _cp_active and hasattr(_model, "prepare_model_inputs_for_cp"):
                     mm_kwargs = {k: batch[k] for k in VLM_INPUT_KEYS if batch.get(k) is not None}
+                    mm_kwargs.update(
+                        {key: batch[key] for key in ("attention_mask", "position_ids") if batch.get(key) is not None}
+                    )
                     with torch.no_grad():
                         prepared = self._run_cp_pre_embed(_model, mm_kwargs)
                     for k in VLM_INPUT_KEYS:

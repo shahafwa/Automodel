@@ -54,6 +54,7 @@ def _train_cp_prepare(_model, batch, *, pp_enabled=False, has_first_stage=True):
         return batch
     if not pp_enabled or has_first_stage:
         mm_kwargs = {k: batch[k] for k in VLM_INPUT_KEYS if batch.get(k) is not None}
+        mm_kwargs.update({key: batch[key] for key in ("attention_mask", "position_ids") if batch.get(key) is not None})
         prepared = _model(_pre_embed_only=True, **mm_kwargs)
         for k in VLM_INPUT_KEYS:
             batch.pop(k, None)
@@ -154,6 +155,26 @@ def test_train_cp_prepare_only_passes_keys_that_are_present():
     # No spurious None-valued multimodal kwargs
     for k in ("pixel_values", "sound_features", "pixel_values_videos"):
         assert k not in call_kwargs
+
+
+def test_train_cp_prepare_forwards_sequence_controls_without_popping_them():
+    """mRoPE pre-embedding receives masks/positions while CP still owns them."""
+    model = _SpyVLM()
+    attention_mask = torch.tensor([[1, 1, 0, 0]])
+    position_ids = torch.arange(4).view(1, 4)
+    batch = {
+        "input_ids": torch.tensor([[1, 2, 0, 0]]),
+        "attention_mask": attention_mask,
+        "position_ids": position_ids,
+        "labels": torch.tensor([[1, 2, -100, -100]]),
+    }
+
+    out_batch = _train_cp_prepare(model, batch)
+
+    assert model.calls[0]["attention_mask"] is attention_mask
+    assert model.calls[0]["position_ids"] is position_ids
+    assert out_batch["attention_mask"] is attention_mask
+    assert out_batch["position_ids"] is position_ids
 
 
 def test_train_cp_prepare_skipped_when_model_has_no_prepare_model_inputs_for_cp():
