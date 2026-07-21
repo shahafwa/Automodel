@@ -95,7 +95,7 @@ dependencies = [
 
 [project.optional-dependencies]
 diffusion = [
-    "diffusers>=0.37.0",
+    "diffusers>=0.39.0",
     "ftfy",
     "imageio",
     "torchvision",
